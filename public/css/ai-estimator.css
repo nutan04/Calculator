@@ -1,0 +1,308 @@
+body.app-bg {
+    background: #f6f7fb;
+    font-family: 'Segoe UI', sans-serif;
+}
+
+.wrap {
+    max-width: 1100px;
+    margin: auto;
+    padding: 40px 20px;
+    text-align: center;
+}
+
+.header h1 {
+    color: #ff6b00;
+}
+
+.header p {
+    color: #666;
+}
+
+/* .steps {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin: 20px 0;
+}
+
+.step {
+    width: 40px;
+    height: 40px;
+    background: #ddd;
+    border-radius: 50%;
+    line-height: 40px;
+}
+
+.step.active {
+    background: #ff6b00;
+    color: #fff;
+} */
+
+/* STEP WRAPPER */
+.step-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 30px 0;
+}
+
+/* EACH STEP */
+.step-item {
+    text-align: center;
+    position: relative;
+}
+
+/* CIRCLE */
+.circle {
+    width: 45px;
+    height: 45px;
+    border-radius: 50%;
+    background: #d9d9d9;
+    color: #ff6b00;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+}
+
+/* ACTIVE STEP */
+.step-item.active .circle {
+    background: #0f2b3d;
+    color: #ff6b00;
+}
+
+/* LABEL */
+.step-item span {
+    display: block;
+    margin-top: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #0f2b3d;
+}
+
+/* LINE BETWEEN STEPS */
+.line {
+    width: 60px;
+    height: 4px;
+    background: #ff6b00;
+    margin: 0px 10px 25px 10px;
+}
+
+.card-box {
+    width: 450px;
+    
+    margin: 40px auto;
+    background: #fff;
+    padding: 40px;
+    border-radius: 16px;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.05);
+}
+
+input {
+    width: 70%;
+    padding: 14px;
+    margin: 10px auto;
+    display: block;
+    border-radius: 10px;
+    border: 1px solid #ddd;
+    background: #fafafa;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(2,1fr);
+    gap: 20px;
+}
+
+.cat {
+    background: #fff;
+    padding: 20px;
+    border-radius: 14px;
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    border: 1px solid #eee;
+    cursor: pointer;
+}
+
+.cat:hover {
+    box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+}
+
+.cat.active {
+    border: 2px solid #ff6b00;
+    background: #fff7f0;
+}
+/* CATEGORY WRAP */
+.category-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 15px;
+    margin-top: 20px;
+    padding: 20px;
+}
+
+/* PILL STYLE (MATCH YOUR MODAL BUTTONS) */
+.category-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 20px 20px;
+    border-radius: 5px;
+    background: #f3f4f6;
+    border: 1px solid #ddd;
+    cursor: pointer;
+    transition: 0.3s;
+    font-size: 14px;
+    box-shadow:  0 6px 20px rgba(0,0,0,0.08);;
+}
+
+/* ICON */
+.category-pill img {
+    width: 18px;
+}
+
+/* HOVER */
+.category-pill:hover {
+    background: #ffece3;
+}
+/* WRAPPER */
+.price-wrapper {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+/* BOX */
+.price-box {
+    width: 220px;
+    background: #fff;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.05);
+    text-align: center;
+}
+
+/* HEADINGS */
+.price-box h3 {
+    color: #0f2b3d;
+    margin-bottom: 10px;
+}
+
+/* CLIENT BOX DIFFERENT COLOR */
+.client-box {
+    border: 2px solid #ff6b00;
+    background: #fff7f0;
+}
+
+/* INPUT */
+.client-box input {
+    width: 100%;
+    margin-bottom: 10px;
+}
+
+/* MOBILE RESPONSIVE */
+@media (max-width: 600px) {
+    .price-wrapper {
+        flex-direction: column;
+        align-items: center;
+    }
+}
+
+/* ACTIVE */
+.category-pill svg {
+    width: 18px;
+    height: 18px;
+    fill: #ff6b00;
+}
+
+/* ACTIVE */
+.category-pill.active svg {
+    fill: #0f172a;
+}
+/* FORM GROUP */
+.form-group {
+    width: 100%;
+    text-align: left;
+    margin-bottom: 15px;
+}
+
+/* LABEL */
+.form-group label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #0f2b3d;
+    margin-bottom: 5px;
+    display: block;
+}
+
+/* SELECT + INPUT SAME DESIGN */
+.form-group select,
+.form-group input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #ddd;
+    background: #fafafa;
+    font-size: 14px;
+    transition: 0.3s;
+}
+
+/* FOCUS EFFECT */
+.form-group select:focus,
+.form-group input:focus {
+    border-color: #ff6b00;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(255,107,0,0.1);
+}
+
+/* DROPDOWN ARROW FIX */
+select {
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg fill='%23999' viewBox='0 0 24 24'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 16px;
+}
+
+/* BUTTON FULL WIDTH */
+#step1 button {
+    width: 100%;
+    margin-top: 20px;
+}
+.icon {
+    width: 55px;
+    height: 55px;
+    background: #f3f3f3;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.icon img {
+    width: 30px;
+}
+
+button {
+    background: #0f172a;
+    color: white;
+    padding: 12px 25px;
+    border-radius: 8px;
+    border: none;
+    margin: 10px;
+}
+
+button:hover {
+    background: #ff6b00;
+}
+
+.step-content {
+    display: none;
+}
+
+.step-content.active {
+    display: block;
+}

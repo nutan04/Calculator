@@ -72,27 +72,31 @@
                 <div class="form-group">
                     <label>Country</label>
                     <select id="country" required>
-                        <option value="India">India</option>
+                        <option value="">Select Country</option>
                     </select>
                 </div>
 
                 <div class="form-group">
                     <label>State</label>
-                    <select id="state" required>
-                        <option>Select State</option>
+                    <select id="state" required disabled>
+                        <option value="">Select State</option>
                     </select>
                 </div>
 
                 <div class="form-group">
                     <label>City</label>
-                    <select id="city" required>
-                        <option>Select City</option>
+                    <select id="city" required disabled>
+                        <option value="">Select City</option>
                     </select>
                 </div>
 
                 <div class="form-group">
                     <label>Area</label>
-                    <input id="area" placeholder="Enter Area (e.g. Baner)" required>
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <input id="area" placeholder="Enter Area (e.g. Baner)" list="area_suggestions" required disabled style="flex:1 1 auto;">
+                        <span id="area_loading" role="status" aria-live="polite" style="display:none; font-size:12px; opacity:.8; white-space:nowrap;">Loading...</span>
+                    </div>
+                    <datalist id="area_suggestions"></datalist>
                 </div>
 
                 <button onclick="nextStep(2)">Next →</button>
@@ -159,9 +163,6 @@
                 <div class="grid">
                     <div class="cat center" onclick="selectCard(this)">Sell</div>
                     <div class="cat center" onclick="selectCard(this)">Rent</div>
-                    <div class="cat center" onclick="selectCard(this)">Mortgage</div>
-                    <div class="cat center" onclick="selectCard(this)">Auction</div>
-                    <div class="cat center" onclick="selectCard(this)">Trade</div>
                 </div>
 
                 <button onclick="prevStep(2)">← Back</button>
@@ -170,9 +171,9 @@
 
             <!-- STEP 4 -->
             <div class="step-content" id="step4">
-                <h2>Enter Size</h2>
+                <h2>Enter Size (per sq/ft)</h2>
 
-                <input type="number" id="sqft" placeholder="Enter Sq Ft" required>
+                <input type="number" id="sqft" placeholder="Enter Size (per sq/ft)" required>
 
                 <button onclick="prevStep(3)">← Back</button>
                 <button onclick="calculate()">Calculate →</button>
@@ -202,11 +203,6 @@
                         <h3>Estimated Price</h3>
 
                         <h1 id="total">₹ 0</h1>
-                        <p id="per">₹ 0 / sqft</p>
-
-                        <p id="min_price">Min: ₹ 0</p>
-                        <p id="max_price">Max: ₹ 0</p>
-                        <p id="avg_price">Avg: ₹ 0</p>
                     </div>
 
                     <!-- ✅ Client Price Box -->
@@ -216,9 +212,7 @@
                         <!-- <input type="number" id="client_price" placeholder="Enter your price per sqft"> -->
 
                         <h1 id="client_total">₹ 0</h1>
-                        <p id="client_per">₹ 0 / sqft</p>
-
-                        <button onclick="calculateClient()">Calculate</button>
+                        <p id="client_status"></p>
                     </div>
 
                 </div>

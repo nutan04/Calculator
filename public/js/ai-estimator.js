@@ -1,14 +1,22 @@
 let step = 1;
+let lastClientFetchKey = null;
+
+function aiEstimatorUserMessage(payload, genericFallback) {
+    if (payload && typeof payload.message === 'string' && payload.message.trim().length > 0) {
+        return payload.message.trim();
+    }
+    return genericFallback;
+}
 
 function nextStep(n) {
-    console.log(n);
     if (step === 1) {
+        let country = document.getElementById("country").value;
         let state = document.getElementById("state").value;
         let city = document.getElementById("city").value;
         let area = document.getElementById("area").value;
     
 
-        if (!state || !city || !area) {
+        if (!country || !state || !city || !area) {
             alert("Please fill all fields");
             return;
         }
@@ -54,6 +62,11 @@ function changeStep(n) {
     updateStepUI(n);
 
     step = n;
+
+    // Auto-fetch Heybroker price when entering pricing step
+    if (step === 5) {
+        calculateClient({ silent: true });
+    }
 }
 
 function updateStepUI(current) {
@@ -89,17 +102,18 @@ function calculate() {
 
 
     // âœ… Validation
-    if (!state || !city || !area || !sqft || !category || !propertyType) {
+    if (!country || !state || !city || !area || !sqft || Number(sqft) <= 0 || !category || !propertyType) {
         alert("Please fill all fields");
         return;
     }
 
     // ðŸ”„ Loading UI
     document.getElementById("total").innerText = "Calculating...";
-    document.getElementById("per").innerText = "";
+    const perEl = document.getElementById("per");
+    if (perEl) perEl.innerText = "";
 
     // âœ… API Call
-    fetch("https://calculator.heybrokr.com/api/price-estimate", {
+    fetch("/api/price-estimate", {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
@@ -114,41 +128,39 @@ function calculate() {
             sqft: sqft
         })
     })
-        .then(res => res.json())
-        .then(res => {
+        .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            return { body };
+        })
+        .then(({ body }) => {
 
-            if (!res.status) {
-                alert("Error fetching price");
+            if (!body.status) {
+                const msg = aiEstimatorUserMessage(
+                    body,
+                    "We couldn't estimate the price right now. Please try different details or try again later."
+                );
+                document.getElementById("total").innerText = "—";
+                alert(msg);
                 return;
             }
 
-            let data = res.data;
+            let data = body.data;
 
-             // ✅ Update UI
+             // ✅ Update UI (total only)
     document.getElementById("total").innerText =
         "₹ " + data.total_price.toLocaleString();
-
-    document.getElementById("per").innerText =
-        "₹ " + data.per_sqft + " / sqft";
-
-    document.getElementById("min_price").innerText =
-        "Min: ₹ " + data.min_price + " / sqft";
-
-    document.getElementById("max_price").innerText =
-        "Max: ₹ " + data.max_price + " / sqft";
-
-    document.getElementById("avg_price").innerText =
-        "Avg: ₹ " + data.avg_price + " / sqft";
 
             changeStep(5);
         })
         .catch(err => {
             console.error(err);
+            document.getElementById("total").innerText = "—";
             alert("We couldn't fetch the price with the selected filters. Please try different filters or try again later.");
         });
 }
 
-function calculateClient() {
+function calculateClient(opts) {
+    const silent = Boolean(opts && opts.silent);
 
     let country = document.getElementById("country").value;
     let state = document.getElementById("state").value;
@@ -159,12 +171,25 @@ function calculateClient() {
      let category = document.querySelector(".category-pill.active")?.textContent.trim() || '';
   let propertyType = document.querySelector(".cat.active")?.textContent.trim() || '';
 
+    // âœ… Validation
+    if (!country || !state || !city || !area || !sqft || Number(sqft) <= 0 || !category || !propertyType) {
+        if (!silent) alert("Please fill all fields");
+        return;
+    }
+
+    const key = [
+        country, state, city, area, String(propertyType), String(category), String(sqft)
+    ].join("|").toLowerCase();
+    if (lastClientFetchKey === key) return;
+    lastClientFetchKey = key;
+
     // ðŸ”„ Loading UI
     document.getElementById("client_total").innerText = "Loading...";
-    document.getElementById("client_per").innerText = "";
+    const clientStatusEl = document.getElementById("client_status");
+    if (clientStatusEl) clientStatusEl.innerText = "";
 
     // âœ… API CALL
-    fetch("https://calculator.heybrokr.com/api/price-estimate-client", {
+    fetch("/api/price-estimate-client", {
         method: "POST",
         headers: {
             "Content-Type": "application/json"
@@ -179,30 +204,47 @@ function calculateClient() {
             sqft: sqft
         })
     })
-    .then(res => res.json())
+    .then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        return { httpStatus: res.status, ok: res.ok, body };
+    })
     .then(res => {
+        const genericHeybroker = "We couldn't load Heybroker pricing right now. Please try again or adjust your selections.";
 
-        if (!res.status) {
-            alert("Error fetching client price");
+        if (!res.ok || !res.body?.status) {
+            const msg = aiEstimatorUserMessage(res.body, genericHeybroker);
+            if (res.httpStatus === 404) {
+                document.getElementById("client_total").innerText = "Not available right now";
+                if (clientStatusEl) clientStatusEl.innerText = msg;
+                return;
+            }
+            document.getElementById("client_total").innerText = "—";
+            if (clientStatusEl) clientStatusEl.innerText = msg;
+            if (!silent) alert(msg);
             return;
         }
 
-        let data = res.data;
+        let data = res.body.data || {};
+        let minPrice = Number(data.min_price);
 
-        let avg = parseFloat(data.avg_price);
-        let total = avg * sqft;
+        if (!Number.isFinite(minPrice) || minPrice <= 0) {
+            document.getElementById("client_total").innerText = "Not available right now";
+            return;
+        }
 
-        // âœ… Update UI
+        let total = minPrice * Number(sqft);
+
+        // âœ… Update UI (total only)
         document.getElementById("client_total").innerText =
-            "â‚¹ " + total.toLocaleString();
-
-        document.getElementById("client_per").innerText =
-            "â‚¹ " + avg + " / sqft";
+            "₹ " + total.toLocaleString();
+        if (clientStatusEl) clientStatusEl.innerText = "";
 
     })
     .catch(err => {
         console.error(err);
-        alert("We couldn't fetch the price with the selected filters. Please try different filters or try again later.");
+        document.getElementById("client_total").innerText = "—";
+        if (clientStatusEl) clientStatusEl.innerText = "We couldn't load Heybroker pricing right now. Please try again.";
+        if (!silent) alert("We couldn't fetch the price with the selected filters. Please try different filters or try again later.");
     });
 }
 function selectCategory(el) {
@@ -213,46 +255,249 @@ function selectCategory(el) {
 
 document.addEventListener("DOMContentLoaded", function () {
 
+    const countryEl = document.getElementById("country");
     const stateEl = document.getElementById("state");
     const cityEl = document.getElementById("city");
+    const areaEl = document.getElementById("area");
+    const areaListEl = document.getElementById("area_suggestions");
+    const areaLoadingEl = document.getElementById("area_loading");
+    const areaProvider = (areaEl?.dataset?.provider || window.AI_ESTIMATOR_AREA_PROVIDER || "google").toString().toLowerCase();
 
-    // âœ… Load states (India default)
-    fetch('/api/states/india')
-        .then(res => res.json())
-        .then(data => {
-
-            stateEl.innerHTML = '<option value="">Select State</option>';
-
-            data.forEach(state => {
-                stateEl.innerHTML += `<option value="${state}">${state}</option>`;
-            });
-
-        })
-        .catch(() => {
-            stateEl.innerHTML = '<option>Error loading states</option>';
+    // Step bar behavior:
+    // - cannot skip ahead
+    // - can click current/previous steps to go back
+    document.querySelectorAll(".step-item").forEach((el, index) => {
+        const targetStep = index + 1;
+        el.style.pointerEvents = "auto";
+        el.style.cursor = "pointer";
+        el.addEventListener("click", function () {
+            if (targetStep <= step) changeStep(targetStep);
         });
-
-    // âœ… When state changes â†’ load cities
-    stateEl.addEventListener("change", function () {
-
-        let selectedState = this.value;
-
-        cityEl.innerHTML = '<option>Loading...</option>';
-
-        fetch(`/api/cities?state=${selectedState}`)
-            .then(res => res.json())
-            .then(data => {
-
-                cityEl.innerHTML = '<option value="">Select City</option>';
-
-                data.forEach(city => {
-                    cityEl.innerHTML += `<option value="${city}">${city}</option>`;
-                });
-
-            })
-            .catch(() => {
-                cityEl.innerHTML = '<option>Error loading cities</option>';
-            });
     });
+
+    if (!areaListEl) {
+        console.error("[ai-estimator] Missing datalist#area_suggestions for #area");
+        return;
+    }
+
+    const cache = {
+        states: new Map(), // key: country
+        cities: new Map(), // key: `${country}|${state}`
+        areas: new Map(),  // key: `${country}|${state}|${city}|${s}`
+    };
+
+    function escapeHtml(str) {
+        return String(str)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    }
+
+    function setSelectOptions(select, options, placeholder) {
+        const ph = placeholder || "Select";
+        select.innerHTML = `<option value="">${escapeHtml(ph)}</option>`;
+        options.forEach(v => {
+            select.innerHTML += `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`;
+        });
+    }
+
+    function debounce(fn, waitMs) {
+        let t = null;
+        return (...args) => {
+            clearTimeout(t);
+            t = setTimeout(() => fn(...args), waitMs);
+        };
+    }
+
+    function resetDownstreamFromCountry() {
+        stateEl.disabled = true;
+        cityEl.disabled = true;
+        areaEl.disabled = true;
+        setSelectOptions(stateEl, [], "Select State");
+        setSelectOptions(cityEl, [], "Select City");
+        areaEl.value = "";
+        areaListEl.innerHTML = "";
+        setAreaLoading(false);
+        if (areasAbort) {
+            try { areasAbort.abort(); } catch (_) {}
+        }
+    }
+
+    function resetDownstreamFromState() {
+        cityEl.disabled = true;
+        areaEl.disabled = true;
+        setSelectOptions(cityEl, [], "Select City");
+        areaEl.value = "";
+        areaListEl.innerHTML = "";
+        setAreaLoading(false);
+        if (areasAbort) {
+            try { areasAbort.abort(); } catch (_) {}
+        }
+    }
+
+    function resetDownstreamFromCity() {
+        areaEl.disabled = true;
+        areaEl.value = "";
+        areaListEl.innerHTML = "";
+        setAreaLoading(false);
+        if (areasAbort) {
+            try { areasAbort.abort(); } catch (_) {}
+        }
+    }
+
+    function setAreaLoading(isLoading) {
+        if (!areaLoadingEl) return;
+        areaLoadingEl.style.display = isLoading ? "inline" : "none";
+        areaLoadingEl.setAttribute("aria-busy", isLoading ? "true" : "false");
+    }
+
+    async function loadCountries() {
+        countryEl.innerHTML = `<option value="">Loading...</option>`;
+        try {
+            const res = await fetch("/api/countries");
+            const data = await res.json();
+            const names = Array.isArray(data) ? data.map(c => c?.name).filter(Boolean) : [];
+            setSelectOptions(countryEl, names, "Select Country");
+        } catch (e) {
+            countryEl.innerHTML = `<option value="">Error loading countries</option>`;
+        }
+    }
+
+    async function loadStates(country) {
+        resetDownstreamFromCountry();
+        if (!country) return;
+
+        stateEl.disabled = true;
+        stateEl.innerHTML = `<option value="">Loading...</option>`;
+
+        if (cache.states.has(country)) {
+            const states = cache.states.get(country);
+            setSelectOptions(stateEl, states, "Select State");
+            stateEl.disabled = states.length === 0;
+            return;
+        }
+
+        try {
+            const res = await fetch(`/api/states?country=${encodeURIComponent(country)}`);
+            const data = await res.json();
+            const states = Array.isArray(data) ? data : [];
+            cache.states.set(country, states);
+            setSelectOptions(stateEl, states, "Select State");
+            stateEl.disabled = states.length === 0;
+        } catch (e) {
+            setSelectOptions(stateEl, [], "Error loading states");
+            stateEl.disabled = true;
+        }
+    }
+
+    async function loadCities(country, state) {
+        resetDownstreamFromState();
+        if (!country || !state) return;
+
+        const key = `${country}|${state}`;
+        cityEl.disabled = true;
+        cityEl.innerHTML = `<option value="">Loading...</option>`;
+
+        if (cache.cities.has(key)) {
+            const cities = cache.cities.get(key);
+            setSelectOptions(cityEl, cities, "Select City");
+            cityEl.disabled = cities.length === 0;
+            return;
+        }
+
+        try {
+            const res = await fetch(`/api/cities?country=${encodeURIComponent(country)}&state=${encodeURIComponent(state)}`);
+            const data = await res.json();
+            const cities = Array.isArray(data) ? data : [];
+            cache.cities.set(key, cities);
+            setSelectOptions(cityEl, cities, "Select City");
+            cityEl.disabled = cities.length === 0;
+        } catch (e) {
+            setSelectOptions(cityEl, [], "Error loading cities");
+            cityEl.disabled = true;
+        }
+    }
+
+    let areasAbort = null;
+    let areasRequestSeq = 0;
+    let lastAreasRequestId = 0;
+    const loadAreas = debounce(async function () {
+        const country = countryEl.value;
+        const state = stateEl.value;
+        const city = cityEl.value;
+        const s = areaEl.value.trim();
+
+        areaListEl.innerHTML = "";
+        if (!country || !state || !city || s.length < 3) {
+            setAreaLoading(false);
+            return; // trigger after 3 chars
+        }
+
+        let cityParam = city;
+        if (String(country).trim().toLowerCase() === "india") {
+            cityParam = String(cityParam).replace(/\s+urban$/i, "").trim();
+        }
+
+        const key = `${country}|${state}|${cityParam}|${s.toLowerCase()}`;
+        if (cache.areas.has(key)) {
+            const areas = cache.areas.get(key);
+            areaListEl.innerHTML = areas.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+            setAreaLoading(false);
+            return;
+        }
+
+        if (areasAbort) {
+            try { areasAbort.abort(); } catch (_) {}
+        }
+
+        const requestId = ++areasRequestSeq;
+        lastAreasRequestId = requestId;
+        areasAbort = new AbortController();
+        setAreaLoading(true);
+
+        try {
+            const url = areaProvider === "google"
+                ? `/api/area-autocomplete?input=${encodeURIComponent(s)}&country=${encodeURIComponent(country)}&state=${encodeURIComponent(state)}&city=${encodeURIComponent(cityParam)}`
+                : `/api/areas?s=${encodeURIComponent(s)}&country=${encodeURIComponent(country)}&state=${encodeURIComponent(state)}&city=${encodeURIComponent(cityParam)}`;
+            const res = await fetch(url, { signal: areasAbort.signal });
+            const data = await res.json();
+            const areas = Array.isArray(data) ? data : [];
+            cache.areas.set(key, areas);
+            areaListEl.innerHTML = areas.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+        } catch (e) {
+            if (e && e.name === "AbortError") return;
+            console.error("[ai-estimator] Failed loading areas", e);
+        } finally {
+            if (requestId === lastAreasRequestId) setAreaLoading(false);
+        }
+    }, 300);
+
+    countryEl.addEventListener("change", function () {
+        loadStates(countryEl.value);
+    });
+
+    stateEl.addEventListener("change", function () {
+        loadCities(countryEl.value, stateEl.value);
+    });
+
+    cityEl.addEventListener("change", function () {
+        resetDownstreamFromCity();
+        if (countryEl.value && stateEl.value && cityEl.value) {
+            areaEl.disabled = false;
+            areaEl.focus();
+        }
+    });
+
+    areaEl.addEventListener("input", loadAreas);
+    // Native datalist should fill input, but some UIs
+    // rely on change/blur to persist selection.
+    areaEl.addEventListener("change", function () {
+        areaEl.value = areaEl.value;
+    });
+
+    resetDownstreamFromCountry();
+    loadCountries();
 
 });

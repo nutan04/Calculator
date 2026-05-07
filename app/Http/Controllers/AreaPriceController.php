@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\EstimateUnavailableException;
 use App\Imports\AreaPriceImport;
 use App\Models\AreaPrice;
 use App\Services\AreaPriceService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Maatwebsite\Excel\Facades\Excel;
 
 class AreaPriceController extends Controller
@@ -47,14 +49,20 @@ class AreaPriceController extends Controller
                         'state' => $request->state,
                         'city' => $request->city,
                         'area' => $request->area,
-                    ]
-                ]
+                    ],
+                ],
             ]);
-        } catch (\Exception $e) {
-            dd($e);
+        } catch (EstimateUnavailableException $e) {
             return response()->json([
                 'status' => false,
-                'message' => $e->getMessage()
+                'message' => $e->getMessage(),
+            ], 422);
+        } catch (\Throwable $e) {
+            Log::error('price-estimate failed', ['exception' => $e]);
+
+            return response()->json([
+                'status' => false,
+                'message' => AreaPriceService::USER_FACING_FAILURE,
             ], 500);
         }
     }
@@ -62,13 +70,13 @@ class AreaPriceController extends Controller
     public function upload(Request $request)
     {
         $request->validate([
-            'file' => 'required'
+            'file' => 'required',
         ]);
         Excel::import(new AreaPriceImport, $request->file('file'));
 
         return response()->json([
             'status' => true,
-            'message' => 'Data imported successfully'
+            'message' => 'Data imported successfully',
         ]);
     }
 
@@ -109,18 +117,26 @@ class AreaPriceController extends Controller
             'category' => 'required|string',
         ]);
 
-       $data = AreaPrice::where('country', $request->country)
-            ->where('state', $request->state)
-            ->where('city', $request->city)   // ✅ filter by city
-            ->where('area', $request->area)
-            ->where('property_type', $request->property_type)
-            ->where('category', $request->category)
-            ->first();
+        $data = AreaPrice::flexibleMatchFirst(
+            $request->country,
+            $request->state,
+            $request->city,
+            $request->area,
+            $request->property_type,
+            $request->category
+        );
 
-         if (!$data) {
+        if (! $data) {
             return response()->json([
                 'status' => false,
-                'message' => 'No price data found for the given parameters'
+                'message' => 'No price data found for the given parameters',
+            ], 404);
+        }
+
+        if ($data->min_price === null) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Minimum price is not available for the given parameters',
             ], 404);
         }
 
@@ -128,9 +144,7 @@ class AreaPriceController extends Controller
             'status' => true,
             'data' => [
                 'min_price' => $data->min_price,
-                'max_price' => $data->max_price,
-                'avg_price' => $data->avg_price,
-            ]
+            ],
         ]);
     }
 }

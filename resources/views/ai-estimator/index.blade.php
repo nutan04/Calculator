@@ -96,6 +96,7 @@
                         <input id="area" placeholder="Enter Area (e.g. Baner)" list="area_suggestions" required disabled style="flex:1 1 auto;">
                         <span id="area_loading" role="status" aria-live="polite" style="display:none; font-size:12px; opacity:.8; white-space:nowrap;">Loading...</span>
                     </div>
+                    <div id="area_no_matches" style="display:none; margin-top:6px; font-size:12px; opacity:.85;" aria-live="polite"></div>
                     <datalist id="area_suggestions"></datalist>
                 </div>
 
@@ -171,9 +172,9 @@
 
             <!-- STEP 4 -->
             <div class="step-content" id="step4">
-                <h2>Enter Size (per sq/ft)</h2>
+                <h2>Enter Size (sq ft)</h2>
 
-                <input type="number" id="sqft" placeholder="Enter Size (per sq/ft)" required>
+                <input type="number" id="sqft" placeholder="Enter Size (sq ft)" required>
 
                 <button onclick="prevStep(3)">← Back</button>
                 <button onclick="calculate()">Calculate →</button>
@@ -203,6 +204,7 @@
                         <h3>Estimated Price</h3>
 
                         <h1 id="total">₹ 0</h1>
+                        <p id="per" style="margin-top:8px; opacity:.85;"></p>
                     </div>
 
                     <!-- ✅ Client Price Box -->
@@ -212,6 +214,7 @@
                         <!-- <input type="number" id="client_price" placeholder="Enter your price per sqft"> -->
 
                         <h1 id="client_total">₹ 0</h1>
+                        <p id="client_per" style="margin-top:8px; opacity:.85;"></p>
                         <p id="client_status"></p>
                     </div>
 

@@ -1,25 +1,47 @@
 <?php
 
 namespace App\Http\Controllers;
-use Illuminate\Http\Request;
+
 use App\Models\AreaPrice;
+use Illuminate\Http\Client\Pool;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Http;
+use Symfony\Component\Intl\Countries;
 
 class LocationController extends Controller
 {
     private const COUNTRIESNOW_BASE_URL = 'https://countriesnow.space/api/v0.1';
+
     private const EXTERNAL_CACHE_DAYS = 7;
+
     private const DB_FALLBACK_THRESHOLD = 5;
+
     private const GOOGLE_AUTOCOMPLETE_TTL_HOURS = 24;
+
     private const GOOGLE_GEOCODE_TTL_DAYS = 30;
+
     private const PLACES_NEW_AUTOCOMPLETE_URL = 'https://places.googleapis.com/v1/places:autocomplete';
+
+    private const PLACES_NEW_DETAILS_BASE_URL = 'https://places.googleapis.com/v1/places/';
+
+    private const AREA_AUTOCOMPLETE_RADIUS_METERS = 8000.0;
+
+    private const PLACE_DETAILS_TTL_DAYS = 30;
+
+    private const PLACE_DETAILS_VERIFY_LIMIT = 3;
+
+    /** Max predictions to consider before Place Details (text-filtered; details still capped at VERIFY_LIMIT). */
+    private const AREA_AUTOCOMPLETE_PRE_DETAILS_LIMIT = 12;
+
+    private const AREA_AUTOCOMPLETE_NO_MATCH_MESSAGE = 'No matching areas found for this city.';
 
     private function normalizeCountry(string $country): string
     {
         $country = trim($country);
+
         return $country;
     }
 
@@ -68,6 +90,7 @@ class LocationController extends Controller
     private function normalizeForCache(string $s): string
     {
         $s = trim(preg_replace('/\s+/u', ' ', $s) ?? '');
+
         return mb_strtolower($s);
     }
 
@@ -77,11 +100,46 @@ class LocationController extends Controller
         $s = mb_strtolower($s);
         $s = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $s) ?? $s;
         $s = trim(preg_replace('/\s+/u', ' ', $s) ?? '');
+
         return $s;
     }
 
+    private function containsLoose(string $haystack, string $needle): bool
+    {
+        $h = $this->normalizeForLooseCompare($haystack);
+        $n = $this->normalizeForLooseCompare($needle);
+        if ($h === '' || $n === '') {
+            return false;
+        }
+
+        return str_contains($h, $n);
+    }
+
+    private function predictionMatchesSelectedLocation(string $fullText, string $city, string $state, string $country): bool
+    {
+        $fullText = trim($fullText);
+        if ($fullText === '') {
+            return false;
+        }
+
+        // Require at least city + country; state may be missing in some suggestions.
+        if (! $this->containsLoose($fullText, $city)) {
+            return false;
+        }
+        if (! $this->containsLoose($fullText, $country)) {
+            return false;
+        }
+
+        $state = trim($state);
+        if ($state !== '' && ! $this->containsLoose($fullText, $state)) {
+            return false;
+        }
+
+        return true;
+    }
+
     /**
-     * @param string[] $suggestions
+     * @param  string[]  $suggestions
      * @return string[]
      */
     private function filterAreaLikeSuggestions(array $suggestions, string $country, string $city): array
@@ -101,10 +159,14 @@ class LocationController extends Controller
         $out = [];
         foreach ($suggestions as $s) {
             $s = trim($s);
-            if ($s === '') continue;
+            if ($s === '') {
+                continue;
+            }
 
             $loose = $this->normalizeForLooseCompare($s);
-            if ($loose === '') continue;
+            if ($loose === '') {
+                continue;
+            }
 
             // Drop pure city suggestions (including Bangalore/Bengaluru normalization).
             if ($loose === $cityNormLoose) {
@@ -117,7 +179,7 @@ class LocationController extends Controller
             }
 
             // If suggestion itself is "City District"/etc, not a locality.
-            if ($cityNormLoose !== '' && str_starts_with($loose, $cityNormLoose . ' ') && preg_match($genericCityRe, $s)) {
+            if ($cityNormLoose !== '' && str_starts_with($loose, $cityNormLoose.' ') && preg_match($genericCityRe, $s)) {
                 continue;
             }
 
@@ -127,12 +189,64 @@ class LocationController extends Controller
             }
 
             $key = $loose;
-            if (isset($seen[$key])) continue;
+            if (isset($seen[$key])) {
+                continue;
+            }
             $seen[$key] = true;
             $out[] = $s;
         }
 
         return array_slice($out, 0, 20);
+    }
+
+    /**
+     * Final guard: every suggestion must relate to what the user typed (drops unrelated API noise).
+     *
+     * @param  string[]  $suggestions
+     * @return string[]
+     */
+    private function filterSuggestionsByInputPrefix(array $suggestions, string $input): array
+    {
+        $inputNorm = $this->normalizeForCache($input);
+        if ($inputNorm === '') {
+            return [];
+        }
+
+        $inputLen = mb_strlen($inputNorm);
+        $out = [];
+
+        foreach ($suggestions as $s) {
+            if (! is_string($s) || trim($s) === '') {
+                continue;
+            }
+
+            $sugNorm = $this->normalizeForCache($s);
+            if ($sugNorm === '') {
+                continue;
+            }
+
+            if ($inputLen >= 4) {
+                if (mb_strpos($sugNorm, $inputNorm, 0, 'UTF-8') !== false) {
+                    $out[] = $s;
+                }
+
+                continue;
+            }
+
+            $parts = preg_split('/\s+/u', $sugNorm, 2);
+            $firstWord = isset($parts[0]) ? (string) $parts[0] : '';
+            if ($firstWord !== '' && str_starts_with($firstWord, $inputNorm)) {
+                $out[] = $s;
+
+                continue;
+            }
+
+            if (mb_strpos($sugNorm, $inputNorm, 0, 'UTF-8') !== false) {
+                $out[] = $s;
+            }
+        }
+
+        return $out;
     }
 
     private function countryNameToIso2(?string $countryName): ?string
@@ -142,8 +256,8 @@ class LocationController extends Controller
             return null;
         }
 
-        if (class_exists(\Symfony\Component\Intl\Countries::class)) {
-            $names = \Symfony\Component\Intl\Countries::getNames('en'); // [ISO2 => Name]
+        if (class_exists(Countries::class)) {
+            $names = Countries::getNames('en'); // [ISO2 => Name]
             foreach ($names as $iso2 => $name) {
                 if (mb_strtolower((string) $name) === mb_strtolower($countryName)) {
                     return strtoupper((string) $iso2);
@@ -158,7 +272,9 @@ class LocationController extends Controller
                 $decoded = json_decode($raw, true);
                 if (is_array($decoded)) {
                     foreach ($decoded as $c) {
-                        if (!is_array($c)) continue;
+                        if (! is_array($c)) {
+                            continue;
+                        }
                         $name = trim((string) ($c['name'] ?? ''));
                         $code = strtoupper(trim((string) ($c['code'] ?? '')));
                         if ($name !== '' && $code !== '' && mb_strtolower($name) === mb_strtolower($countryName)) {
@@ -186,7 +302,8 @@ class LocationController extends Controller
             return null;
         }
 
-        $cacheKey = 'ai_estimator:google:geocode:v2:' . md5($this->normalizeForCache($city . '|' . $state . '|' . $country));
+        $cacheKey = 'ai_estimator:google:geocode:v2:'.md5($this->normalizeForCache($city.'|'.$state.'|'.$country));
+
         return Cache::store('file')->remember($cacheKey, now()->addDays(self::GOOGLE_GEOCODE_TTL_DAYS), function () use ($city, $state, $country, $iso2) {
             $key = (string) config('services.google.maps_api_key');
             if (trim($key) === '') {
@@ -215,7 +332,7 @@ class LocationController extends Controller
                 ];
 
                 if ($iso2) {
-                    $query['components'] = 'country:' . strtoupper($iso2);
+                    $query['components'] = 'country:'.strtoupper($iso2);
                 }
 
                 try {
@@ -226,7 +343,7 @@ class LocationController extends Controller
                         ->acceptJson()
                         ->get('/geocode/json', $query);
 
-                    if (!$res->ok()) {
+                    if (! $res->ok()) {
                         continue;
                     }
 
@@ -245,7 +362,7 @@ class LocationController extends Controller
                     $loc = data_get($json, 'results.0.geometry.location');
                     $lat = is_array($loc) ? ($loc['lat'] ?? null) : null;
                     $lng = is_array($loc) ? ($loc['lng'] ?? null) : null;
-                    if (!is_numeric($lat) || !is_numeric($lng)) {
+                    if (! is_numeric($lat) || ! is_numeric($lng)) {
                         continue;
                     }
 
@@ -281,32 +398,34 @@ class LocationController extends Controller
                 ->acceptJson()
                 ->get('/place/autocomplete/json', $query);
 
-            if (!$res->ok()) {
+            if (! $res->ok()) {
                 if (config('app.debug')) {
                     Log::debug('Google Places Autocomplete HTTP error', ['status' => $res->status()]);
                 }
+
                 return ['predictions' => [], 'status' => 'HTTP_ERROR', 'cacheable' => false, 'error_message' => null];
             }
 
             $json = $res->json();
-            if (!is_array($json)) {
+            if (! is_array($json)) {
                 return ['predictions' => [], 'status' => 'INVALID_JSON', 'cacheable' => false, 'error_message' => null];
             }
 
             $status = (string) ($json['status'] ?? '');
             $predictions = $json['predictions'] ?? [];
-            if (!is_array($predictions)) {
+            if (! is_array($predictions)) {
                 $predictions = [];
             }
             $errMsg = isset($json['error_message']) ? (string) $json['error_message'] : null;
 
-            if (!in_array($status, ['OK', 'ZERO_RESULTS'], true)) {
+            if (! in_array($status, ['OK', 'ZERO_RESULTS'], true)) {
                 if (config('app.debug')) {
                     Log::debug('Google Places Autocomplete API error', [
                         'status' => $status,
                         'error_message' => $errMsg,
                     ]);
                 }
+
                 return ['predictions' => [], 'status' => $status, 'cacheable' => false, 'error_message' => $errMsg];
             }
 
@@ -315,6 +434,7 @@ class LocationController extends Controller
             if (config('app.debug')) {
                 Log::debug('Google Places Autocomplete exception', ['message' => $e->getMessage()]);
             }
+
             return ['predictions' => [], 'status' => 'EXCEPTION', 'cacheable' => false, 'error_message' => $e->getMessage()];
         }
     }
@@ -344,15 +464,16 @@ class LocationController extends Controller
         }
 
         if ($latLng) {
-            $bodyBase['locationBias'] = [
+            $circle = [
                 'circle' => [
                     'center' => [
                         'latitude' => $latLng['lat'],
                         'longitude' => $latLng['lng'],
                     ],
-                    'radius' => 20000.0,
+                    'radius' => self::AREA_AUTOCOMPLETE_RADIUS_METERS,
                 ],
             ];
+            $bodyBase['locationBias'] = $circle;
         }
 
         try {
@@ -361,6 +482,20 @@ class LocationController extends Controller
             // If supported by the Places API (New) backend, these narrow results to "areas".
             // If not supported, we fall back transparently on INVALID_ARGUMENT.
             $bodyWithTypeHints['includedPrimaryTypes'] = ['neighborhood', 'sublocality', 'sublocality_level_1', 'sublocality_level_2', 'locality', 'administrative_area_level_3'];
+
+            // Prefer strict restriction (if backend supports it), then fall back to bias.
+            if ($latLng) {
+                $restricted = $bodyBase;
+                $restricted['locationRestriction'] = $bodyBase['locationBias'];
+                unset($restricted['locationBias']);
+
+                $restrictedWithTypes = $restricted;
+                $restrictedWithTypes['includedPrimaryTypes'] = $bodyWithTypeHints['includedPrimaryTypes'];
+
+                $attemptBodies[] = $restrictedWithTypes;
+                $attemptBodies[] = $restricted;
+            }
+
             $attemptBodies[] = $bodyWithTypeHints;
             $attemptBodies[] = $bodyBase;
 
@@ -372,7 +507,7 @@ class LocationController extends Controller
             foreach ($attemptBodies as $body) {
                 $res = Http::withHeaders([
                     'X-Goog-Api-Key' => $key,
-                    'X-Goog-FieldMask' => 'suggestions.placePrediction.text.text,suggestions.placePrediction.structuredFormat.mainText.text',
+                    'X-Goog-FieldMask' => 'suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.structuredFormat.mainText.text,suggestions.placePrediction.structuredFormat.secondaryText.text',
                 ])
                     ->connectTimeout(2)
                     ->timeout(4)
@@ -391,7 +526,7 @@ class LocationController extends Controller
                 $lastErrMsg = is_array($jsonErr) ? (string) data_get($jsonErr, 'error.message', '') : '';
                 $lastErrStatus = is_array($jsonErr) ? (string) data_get($jsonErr, 'error.status', '') : '';
 
-                // If "includedPrimaryTypes" is unsupported, retry without it.
+                // If "includedPrimaryTypes" or "locationRestriction" is unsupported, retry next attempt.
                 if ($lastErrStatus === 'INVALID_ARGUMENT') {
                     continue;
                 }
@@ -399,11 +534,11 @@ class LocationController extends Controller
                 break;
             }
 
-            if (!$res) {
+            if (! $res) {
                 return ['suggestions' => [], 'status' => 'HTTP_ERROR', 'error_message' => null, 'cacheable' => false, 'http_status' => null];
             }
 
-            if (!$res->ok()) {
+            if (! $res->ok()) {
                 $json = $res->json();
                 $errMsg = is_array($json) ? (string) data_get($json, 'error.message', '') : ($lastErrMsg ?? '');
                 $errStatus = is_array($json) ? (string) data_get($json, 'error.status', '') : ($lastErrStatus ?? '');
@@ -417,7 +552,7 @@ class LocationController extends Controller
 
                 return [
                     'suggestions' => [],
-                    'status' => $errStatus !== '' ? $errStatus : 'HTTP_' . (string) $httpStatus,
+                    'status' => $errStatus !== '' ? $errStatus : 'HTTP_'.(string) $httpStatus,
                     'error_message' => $errMsg !== '' ? $errMsg : null,
                     'cacheable' => false,
                     'http_status' => $httpStatus,
@@ -425,7 +560,7 @@ class LocationController extends Controller
             }
 
             $json = $res->json();
-            if (!is_array($json)) {
+            if (! is_array($json)) {
                 return ['suggestions' => [], 'status' => 'INVALID_JSON', 'error_message' => null, 'cacheable' => false, 'http_status' => $httpStatus];
             }
 
@@ -443,7 +578,7 @@ class LocationController extends Controller
             }
 
             $suggestions = $json['suggestions'] ?? [];
-            if (!is_array($suggestions)) {
+            if (! is_array($suggestions)) {
                 $suggestions = [];
             }
 
@@ -463,19 +598,432 @@ class LocationController extends Controller
         }
     }
 
+    private function placeDetailsCacheKey(string $placeId): string
+    {
+        return 'ai_estimator:google:places_details:v1:'.md5($placeId);
+    }
+
     /**
-     * @param array<int, mixed> $suggestions
+     * @return array<int, array{type: string, value: string}>
+     */
+    private function parsePlaceDetailsAddressComponentsFromJson(mixed $json): array
+    {
+        if (! is_array($json)) {
+            return [];
+        }
+        $acs = $json['addressComponents'] ?? [];
+        if (! is_array($acs)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($acs as $ac) {
+            if (! is_array($ac)) {
+                continue;
+            }
+            $types = $ac['types'] ?? [];
+            if (! is_array($types)) {
+                continue;
+            }
+            $long = trim((string) data_get($ac, 'longText', ''));
+            $short = trim((string) data_get($ac, 'shortText', ''));
+            $val = $long !== '' ? $long : $short;
+            if ($val === '') {
+                continue;
+            }
+
+            foreach ($types as $t) {
+                $t = trim((string) $t);
+                if ($t === '') {
+                    continue;
+                }
+                $out[] = ['type' => $t, 'value' => $val];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Fetch Place Details for many place IDs; uses file cache per ID and Http::pool() for cache misses.
+     *
+     * @param  string[]  $placeIds
+     * @return array<string, array<int, array{type: string, value: string}>>
+     */
+    private function placeDetailsAddressComponentsBatch(array $placeIds): array
+    {
+        $placeIds = array_values(array_unique(array_filter(array_map('trim', $placeIds), fn ($id) => $id !== '')));
+        if ($placeIds === []) {
+            return [];
+        }
+
+        $store = Cache::store('file');
+        $ttl = now()->addDays(self::PLACE_DETAILS_TTL_DAYS);
+        $out = [];
+        $toFetch = [];
+
+        foreach ($placeIds as $id) {
+            $cacheKey = $this->placeDetailsCacheKey($id);
+            if ($store->has($cacheKey)) {
+                $cached = $store->get($cacheKey);
+                $out[$id] = is_array($cached) ? $cached : [];
+            } else {
+                $toFetch[] = $id;
+            }
+        }
+
+        $key = trim((string) config('services.google.maps_api_key'));
+        if ($toFetch !== [] && $key !== '') {
+            try {
+                $responses = Http::pool(function (Pool $pool) use ($toFetch, $key) {
+                    $pending = [];
+                    foreach ($toFetch as $placeId) {
+                        $pending[] = $pool->as($placeId)
+                            ->withHeaders([
+                                'X-Goog-Api-Key' => $key,
+                                'X-Goog-FieldMask' => 'addressComponents',
+                            ])
+                            ->connectTimeout(2)
+                            ->timeout(5)
+                            ->acceptJson()
+                            ->get(self::PLACES_NEW_DETAILS_BASE_URL.rawurlencode($placeId));
+                    }
+
+                    return $pending;
+                });
+
+                foreach ($toFetch as $placeId) {
+                    $components = [];
+                    $res = $responses[$placeId] ?? null;
+                    if ($res !== null && $res->successful()) {
+                        $components = $this->parsePlaceDetailsAddressComponentsFromJson($res->json());
+                    }
+                    $store->put($this->placeDetailsCacheKey($placeId), $components, $ttl);
+                    $out[$placeId] = $components;
+                }
+            } catch (\Throwable $e) {
+                foreach ($toFetch as $placeId) {
+                    if (! array_key_exists($placeId, $out)) {
+                        $store->put($this->placeDetailsCacheKey($placeId), [], $ttl);
+                        $out[$placeId] = [];
+                    }
+                }
+            }
+        } elseif ($toFetch !== []) {
+            foreach ($toFetch as $placeId) {
+                $store->put($this->placeDetailsCacheKey($placeId), [], $ttl);
+                $out[$placeId] = [];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @return array<int, array{type: string, value: string}>
+     */
+    private function placeDetailsAddressComponents(string $placeId): array
+    {
+        $placeId = trim($placeId);
+        if ($placeId === '') {
+            return [];
+        }
+
+        $batch = $this->placeDetailsAddressComponentsBatch([$placeId]);
+
+        return $batch[$placeId] ?? [];
+    }
+
+    private function addressComponentValue(array $components, string $type): ?string
+    {
+        foreach ($components as $c) {
+            if (! is_array($c)) {
+                continue;
+            }
+            if (($c['type'] ?? null) === $type) {
+                $v = trim((string) ($c['value'] ?? ''));
+                if ($v !== '') {
+                    return $v;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<int, array{type: string, value: string}>  $components
+     */
+    private function placeComponentsMatchSelectedLocation(array $components, string $city, string $state, string $country): bool
+    {
+        if ($components === []) {
+            return false;
+        }
+
+        $countryComp = $this->addressComponentValue($components, 'country');
+        if ($countryComp && ! $this->containsLoose($countryComp, $country) && ! $this->containsLoose($country, $countryComp)) {
+            return false;
+        }
+
+        $state = trim($state);
+        if ($state !== '') {
+            $admin1 = $this->addressComponentValue($components, 'administrative_area_level_1');
+            if ($admin1 && ! $this->containsLoose($admin1, $state) && ! $this->containsLoose($state, $admin1)) {
+                return false;
+            }
+        }
+
+        $cityNorm = $this->normalizeCityForMatching($city, $country);
+
+        $locality = $this->addressComponentValue($components, 'locality');
+        if ($locality && $this->containsLoose($locality, $cityNorm)) {
+            return true;
+        }
+
+        $admin3 = $this->addressComponentValue($components, 'administrative_area_level_3');
+        if ($admin3 && $this->containsLoose($admin3, $cityNorm)) {
+            return true;
+        }
+
+        $admin2 = $this->addressComponentValue($components, 'administrative_area_level_2');
+        if ($admin2 && $this->containsLoose($admin2, $cityNorm)) {
+            return true;
+        }
+
+        foreach ($components as $c) {
+            if (! is_array($c)) {
+                continue;
+            }
+            $v = trim((string) ($c['value'] ?? ''));
+            if ($v === '') {
+                continue;
+            }
+            if ($this->containsLoose($v, $cityNorm)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function placeIdMatchesSelectedLocation(string $placeId, string $city, string $state, string $country): bool
+    {
+        $placeId = trim($placeId);
+        if ($placeId === '') {
+            return false;
+        }
+
+        $components = $this->placeDetailsAddressComponents($placeId);
+
+        return $this->placeComponentsMatchSelectedLocation($components, $city, $state, $country);
+    }
+
+    /**
+     * Single canonical description line for Places API (New) autocomplete rows.
+     */
+    private function canonicalFullTextFromNewSuggestionRow(mixed $row): string
+    {
+        if (! is_array($row)) {
+            return '';
+        }
+        $pp = $row['placePrediction'] ?? null;
+        if (! is_array($pp)) {
+            return '';
+        }
+        $full = trim((string) data_get($pp, 'text.text', ''));
+        if ($full !== '') {
+            return $full;
+        }
+        $main = trim((string) data_get($pp, 'structuredFormat.mainText.text', ''));
+        $sec = trim((string) data_get($pp, 'structuredFormat.secondaryText.text', ''));
+
+        return trim($main.($sec !== '' ? ', '.$sec : ''));
+    }
+
+    /**
+     * Single canonical description for legacy autocomplete predictions.
+     */
+    private function canonicalFullTextFromLegacyPrediction(mixed $p): string
+    {
+        if (! is_array($p)) {
+            return '';
+        }
+        $full = trim((string) ($p['description'] ?? ''));
+        if ($full !== '') {
+            return $full;
+        }
+        $main = trim((string) data_get($p, 'structured_formatting.main_text', ''));
+        $sec = trim((string) data_get($p, 'structured_formatting.secondary_text', ''));
+
+        return trim($main.($sec !== '' ? ', '.$sec : ''));
+    }
+
+    /**
+     * Aggressive scope filter: the full description must contain normalized city, country,
+     * and state (when provided) — avoids cross-city matches before any Place Details calls.
+     *
+     * @param  array<int, mixed>  $suggestions
+     * @return array<int, mixed>
+     */
+    private function filterNewSuggestionsByStrictFullDescription(array $suggestions, string $city, string $state, string $country): array
+    {
+        if ($suggestions === []) {
+            return [];
+        }
+
+        $cityForMatch = $this->normalizeCityForMatching($city, $country);
+        $out = [];
+        foreach ($suggestions as $row) {
+            $full = $this->canonicalFullTextFromNewSuggestionRow($row);
+            if ($full === '' || ! $this->predictionMatchesSelectedLocation($full, $cityForMatch, $state, $country)) {
+                continue;
+            }
+            $out[] = $row;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<int, mixed>  $predictions
+     * @return array<int, mixed>
+     */
+    private function filterLegacyPredictionsByStrictFullDescription(array $predictions, string $city, string $state, string $country): array
+    {
+        if ($predictions === []) {
+            return [];
+        }
+
+        $cityForMatch = $this->normalizeCityForMatching($city, $country);
+        $out = [];
+        foreach ($predictions as $p) {
+            $full = $this->canonicalFullTextFromLegacyPrediction($p);
+            if ($full === '' || ! $this->predictionMatchesSelectedLocation($full, $cityForMatch, $state, $country)) {
+                continue;
+            }
+            $out[] = $p;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Strictly validates Place predictions by Place Details (parallel fetch for cache misses).
+     *
+     * @param  array<int, mixed>  $suggestions
+     * @return array<int, mixed>
+     */
+    private function verifyNewSuggestionsByPlaceDetails(array $suggestions, string $city, string $state, string $country): array
+    {
+        if ($suggestions === []) {
+            return [];
+        }
+
+        $suggestions = $this->filterNewSuggestionsByStrictFullDescription($suggestions, $city, $state, $country);
+        if ($suggestions === []) {
+            return [];
+        }
+
+        $candidates = [];
+        foreach ($suggestions as $row) {
+            if (count($candidates) >= self::PLACE_DETAILS_VERIFY_LIMIT) {
+                break;
+            }
+            if (! is_array($row)) {
+                continue;
+            }
+            $pp = $row['placePrediction'] ?? null;
+            if (! is_array($pp)) {
+                continue;
+            }
+            $placeId = trim((string) data_get($pp, 'placeId', ''));
+            if ($placeId === '') {
+                continue;
+            }
+            $candidates[] = ['row' => $row, 'placeId' => $placeId];
+        }
+
+        if ($candidates === []) {
+            return [];
+        }
+
+        $ids = array_column($candidates, 'placeId');
+        $batch = $this->placeDetailsAddressComponentsBatch($ids);
+
+        $out = [];
+        foreach ($candidates as $c) {
+            $components = $batch[$c['placeId']] ?? [];
+            if ($this->placeComponentsMatchSelectedLocation($components, $city, $state, $country)) {
+                $out[] = $c['row'];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Strictly validates legacy Places predictions (place_id) via Place Details (parallel fetch for cache misses).
+     *
+     * @param  array<int, mixed>  $predictions
+     * @return array<int, mixed>
+     */
+    private function verifyLegacyPredictionsByPlaceDetails(array $predictions, string $city, string $state, string $country): array
+    {
+        if ($predictions === []) {
+            return [];
+        }
+
+        $predictions = $this->filterLegacyPredictionsByStrictFullDescription($predictions, $city, $state, $country);
+        if ($predictions === []) {
+            return [];
+        }
+
+        $candidates = [];
+        foreach ($predictions as $p) {
+            if (count($candidates) >= self::PLACE_DETAILS_VERIFY_LIMIT) {
+                break;
+            }
+            if (! is_array($p)) {
+                continue;
+            }
+            $placeId = trim((string) ($p['place_id'] ?? ''));
+            if ($placeId === '') {
+                continue;
+            }
+            $candidates[] = ['row' => $p, 'placeId' => $placeId];
+        }
+
+        if ($candidates === []) {
+            return [];
+        }
+
+        $ids = array_column($candidates, 'placeId');
+        $batch = $this->placeDetailsAddressComponentsBatch($ids);
+
+        $out = [];
+        foreach ($candidates as $c) {
+            $components = $batch[$c['placeId']] ?? [];
+            if ($this->placeComponentsMatchSelectedLocation($components, $city, $state, $country)) {
+                $out[] = $c['row'];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<int, mixed>  $suggestions
      * @return string[]
      */
     private function newSuggestionsToMainTexts(array $suggestions): array
     {
         $out = [];
         foreach ($suggestions as $row) {
-            if (!is_array($row)) {
+            if (! is_array($row)) {
                 continue;
             }
             $pp = $row['placePrediction'] ?? null;
-            if (!is_array($pp)) {
+            if (! is_array($pp)) {
                 continue;
             }
             $mainText = trim((string) data_get($pp, 'structuredFormat.mainText.text', ''));
@@ -496,14 +1044,14 @@ class LocationController extends Controller
     }
 
     /**
-     * @param array<int, mixed> $predictions
+     * @param  array<int, mixed>  $predictions
      * @return string[]
      */
     private function predictionsToMainTexts(array $predictions): array
     {
         $out = [];
         foreach ($predictions as $p) {
-            if (!is_array($p)) {
+            if (! is_array($p)) {
                 continue;
             }
             $mainText = trim((string) data_get($p, 'structured_formatting.main_text', ''));
@@ -536,7 +1084,7 @@ class LocationController extends Controller
             return [];
         }
 
-        $cacheKey = 'ai_estimator:countriesnow:states:v1:' . md5(mb_strtolower($country));
+        $cacheKey = 'ai_estimator:countriesnow:states:v1:'.md5(mb_strtolower($country));
 
         return Cache::store('file')->remember($cacheKey, now()->addDays(self::EXTERNAL_CACHE_DAYS), function () use ($country) {
             try {
@@ -548,13 +1096,13 @@ class LocationController extends Controller
                     ->asJson()
                     ->post('/countries/states', ['country' => $country]);
 
-                if (!$res->ok()) {
+                if (! $res->ok()) {
                     return [];
                 }
 
                 $json = $res->json();
                 $states = data_get($json, 'data.states', []);
-                if (!is_array($states)) {
+                if (! is_array($states)) {
                     return [];
                 }
 
@@ -568,6 +1116,7 @@ class LocationController extends Controller
 
                 $names = array_values(array_unique($names));
                 sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+
                 return $names;
             } catch (\Throwable $e) {
                 return [];
@@ -586,7 +1135,7 @@ class LocationController extends Controller
             return [];
         }
 
-        $cacheKey = 'ai_estimator:countriesnow:cities:v1:' . md5(mb_strtolower($country . '|' . $state));
+        $cacheKey = 'ai_estimator:countriesnow:cities:v1:'.md5(mb_strtolower($country.'|'.$state));
 
         return Cache::store('file')->remember($cacheKey, now()->addDays(self::EXTERNAL_CACHE_DAYS), function () use ($country, $state) {
             try {
@@ -598,23 +1147,25 @@ class LocationController extends Controller
                     ->asJson()
                     ->post('/countries/state/cities', ['country' => $country, 'state' => $state]);
 
-                if (!$res->ok()) {
+                if (! $res->ok()) {
                     return [];
                 }
 
                 $json = $res->json();
                 $cities = data_get($json, 'data', []);
-                if (!is_array($cities)) {
+                if (! is_array($cities)) {
                     return [];
                 }
 
                 $names = array_values(array_filter(array_map(function ($c) {
                     $c = trim((string) $c);
+
                     return $c === '' ? null : $c;
                 }, $cities)));
 
                 $names = array_values(array_unique($names));
                 sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+
                 return $names;
             } catch (\Throwable $e) {
                 return [];
@@ -625,8 +1176,8 @@ class LocationController extends Controller
     public function countries()
     {
         $countries = Cache::remember('ai_estimator:countries:v2', now()->addDays(30), function () {
-            if (class_exists(\Symfony\Component\Intl\Countries::class)) {
-                $names = \Symfony\Component\Intl\Countries::getNames('en');
+            if (class_exists(Countries::class)) {
+                $names = Countries::getNames('en');
                 $out = [];
                 foreach ($names as $code => $name) {
                     $code = strtoupper(trim((string) $code));
@@ -645,18 +1196,18 @@ class LocationController extends Controller
             }
 
             $path = base_path('resources/data/countries.json');
-            if (!is_file($path)) {
+            if (! is_file($path)) {
                 return [];
             }
 
             $raw = file_get_contents($path);
             $decoded = json_decode($raw, true);
-            if (!is_array($decoded)) {
+            if (! is_array($decoded)) {
                 return [];
             }
 
             return array_values(array_filter(array_map(function ($c) {
-                if (!is_array($c)) {
+                if (! is_array($c)) {
                     return null;
                 }
                 $name = isset($c['name']) ? trim((string) $c['name']) : '';
@@ -664,6 +1215,7 @@ class LocationController extends Controller
                 if ($name === '') {
                     return null;
                 }
+
                 return ['name' => $name, 'code' => $code];
             }, $decoded)));
         });
@@ -679,7 +1231,7 @@ class LocationController extends Controller
         }
 
         try {
-            if (!Schema::hasColumn((new AreaPrice())->getTable(), 'country') || !Schema::hasColumn((new AreaPrice())->getTable(), 'state')) {
+            if (! Schema::hasColumn((new AreaPrice)->getTable(), 'country') || ! Schema::hasColumn((new AreaPrice)->getTable(), 'state')) {
                 return response()->json([]);
             }
         } catch (\Throwable $e) {
@@ -690,7 +1242,7 @@ class LocationController extends Controller
             return response()->json($this->countriesNowStates($country));
         }
 
-        $cacheKey = 'ai_estimator:states:v2:' . md5(mb_strtolower($country));
+        $cacheKey = 'ai_estimator:states:v2:'.md5(mb_strtolower($country));
 
         $states = Cache::remember($cacheKey, now()->addMinutes(30), function () use ($country) {
             $dbStates = AreaPrice::query()
@@ -708,6 +1260,7 @@ class LocationController extends Controller
             }
 
             $external = $this->countriesNowStates($country);
+
             return count($external) > 0 ? $external : $dbStates;
         });
 
@@ -722,16 +1275,16 @@ class LocationController extends Controller
             return response()->json([]);
         }
 
-        $table = (new AreaPrice())->getTable();
+        $table = (new AreaPrice)->getTable();
         try {
-            if (!Schema::hasColumn($table, 'country') || !Schema::hasColumn($table, 'state') || !Schema::hasColumn($table, 'city')) {
+            if (! Schema::hasColumn($table, 'country') || ! Schema::hasColumn($table, 'state') || ! Schema::hasColumn($table, 'city')) {
                 return response()->json([]);
             }
         } catch (\Throwable $e) {
             return response()->json([]);
         }
 
-        $cacheKey = 'ai_estimator:cities:v2:' . md5(mb_strtolower($country . '|' . $state));
+        $cacheKey = 'ai_estimator:cities:v2:'.md5(mb_strtolower($country.'|'.$state));
 
         $cities = Cache::remember($cacheKey, now()->addMinutes(30), function () use ($country, $state) {
             if ($this->isIndia($country)) {
@@ -757,6 +1310,7 @@ class LocationController extends Controller
             }
 
             $external = $this->countriesNowCities($country, $state);
+
             return count($external) > 0 ? $external : $dbCities;
         });
 
@@ -774,9 +1328,9 @@ class LocationController extends Controller
             return response()->json([]);
         }
 
-        $table = (new AreaPrice())->getTable();
+        $table = (new AreaPrice)->getTable();
         try {
-            if (!Schema::hasColumn($table, 'country') || !Schema::hasColumn($table, 'state') || !Schema::hasColumn($table, 'city') || !Schema::hasColumn($table, 'area')) {
+            if (! Schema::hasColumn($table, 'country') || ! Schema::hasColumn($table, 'state') || ! Schema::hasColumn($table, 'city') || ! Schema::hasColumn($table, 'area')) {
                 return response()->json([]);
             }
         } catch (\Throwable $e) {
@@ -784,7 +1338,7 @@ class LocationController extends Controller
         }
 
         $normCity = $this->normalizeCityForMatching($city, $country);
-        $cacheKey = 'ai_estimator:areas:v2:' . md5(mb_strtolower($country . '|' . $state . '|' . $city . '|' . $normCity . '|' . $s));
+        $cacheKey = 'ai_estimator:areas:v2:'.md5(mb_strtolower($country.'|'.$state.'|'.$city.'|'.$normCity.'|'.$s));
 
         $areas = Cache::remember($cacheKey, now()->addMinutes(10), function () use ($country, $state, $city, $normCity, $s) {
             $escaped = addcslashes($s, '\\%_');
@@ -794,7 +1348,7 @@ class LocationController extends Controller
                 ->where('state', $state)
                 ->whereNotNull('area')
                 ->where('area', '<>', '')
-                ->where('area', 'like', '%' . $escaped . '%')
+                ->where('area', 'like', '%'.$escaped.'%')
                 ->distinct()
                 ->orderBy('area')
                 ->limit(20);
@@ -828,7 +1382,7 @@ class LocationController extends Controller
                     foreach ($candidates as $cand) {
                         $escapedCand = addcslashes($cand, '\\%_');
                         $q->orWhereRaw('LOWER(city) = ?', [$cand])
-                            ->orWhereRaw('LOWER(city) LIKE ?', [$escapedCand . '%'])
+                            ->orWhereRaw('LOWER(city) LIKE ?', [$escapedCand.'%'])
                             ->orWhereRaw('? LIKE CONCAT(LOWER(city), \'%\')', [$cand]);
                     }
                 })
@@ -847,7 +1401,7 @@ class LocationController extends Controller
                     ->where('state', $state)
                     ->whereNotNull('area')
                     ->where('area', '<>', '')
-                    ->where('area', 'like', '%' . $escaped . '%')
+                    ->where('area', 'like', '%'.$escaped.'%')
                     ->distinct()
                     ->orderBy('area')
                     ->limit(20)
@@ -879,20 +1433,28 @@ class LocationController extends Controller
 
         $iso2 = $this->countryNameToIso2($country);
 
-        $cacheKey = 'ai_estimator:google:area_autocomplete:v3:' . md5($this->normalizeForCache($input . '|' . $country . '|' . $state . '|' . $city));
+        // v9: input-prefix/substring filter after area-like post-filter; response {suggestions, message}.
+        $cacheKey = 'ai_estimator:google:area_autocomplete:v9:'.md5($this->normalizeForCache($input.'|'.$country.'|'.$state.'|'.$city));
         $store = Cache::store('file');
         if ($store->has($cacheKey)) {
             $cached = $store->get($cacheKey);
+            if (is_array($cached) && array_key_exists('suggestions', $cached)) {
+                return response()->json($cached);
+            }
 
-            return response()->json(is_array($cached) ? $cached : []);
+            return response()->json([
+                'suggestions' => is_array($cached) ? $cached : [],
+                'message' => null,
+            ]);
         }
 
         $latLng = $this->geocodeCityLatLng($city, $state, $country, $iso2);
 
-        $inputVariants = [$input];
-        $inputVariants[] = trim($input . ', ' . $city . ', ' . $state . ', ' . $country);
+        // Prefer city-scoped query first (faster, fewer cross-city predictions vs bare input).
+        $inputVariants = [trim($input.', '.$city.', '.$state.', '.$country)];
+        $inputVariants[] = $input;
         if ($this->isIndia($country)) {
-            $inputVariants[] = trim($input . ', ' . $city . ', India');
+            $inputVariants[] = trim($input.', '.$city.', India');
             $cityAlt = $city;
             if (str_contains(mb_strtolower($city), 'bangalore')) {
                 $cityAlt = str_ireplace('bangalore', 'Bengaluru', $city);
@@ -900,8 +1462,10 @@ class LocationController extends Controller
                 $cityAlt = str_ireplace('bengaluru', 'Bangalore', $city);
             }
             if ($cityAlt !== $city) {
-                $inputVariants[] = trim($input . ', ' . $cityAlt . ', ' . $state . ', ' . $country);
-                $inputVariants[] = trim($input . ', ' . $cityAlt . ', India');
+                array_splice($inputVariants, 1, 0, [
+                    trim($input.', '.$cityAlt.', '.$state.', '.$country),
+                    trim($input.', '.$cityAlt.', India'),
+                ]);
             }
         }
         $inputVariants = array_values(array_unique(array_filter($inputVariants, fn ($v) => is_string($v) && trim($v) !== '')));
@@ -918,13 +1482,23 @@ class LocationController extends Controller
             $fetchedNew = $this->fetchPlaceAutocompleteNew($inputTry, $iso2, $latLng);
             $lastNewStatus = $fetchedNew['status'];
             $lastNewError = $fetchedNew['error_message'];
-            if (!$fetchedNew['cacheable']) {
+            if (! $fetchedNew['cacheable']) {
                 $anyNonCacheableResponse = true;
             }
             if ($fetchedNew['suggestions'] !== []) {
-                $newSuggestionsRaw = $fetchedNew['suggestions'];
-                break;
+                $scoped = $this->filterNewSuggestionsByStrictFullDescription($fetchedNew['suggestions'], $city, $state, $country);
+                if ($scoped !== []) {
+                    $newSuggestionsRaw = $scoped;
+                    break;
+                }
             }
+        }
+
+        // Hard guarantee: never return cross-city suggestions.
+        // We only keep predictions whose Place Details confirm they belong to the selected city.
+        if ($newSuggestionsRaw !== []) {
+            $newSuggestionsRaw = array_slice($newSuggestionsRaw, 0, self::AREA_AUTOCOMPLETE_PRE_DETAILS_LIMIT);
+            $newSuggestionsRaw = $this->verifyNewSuggestionsByPlaceDetails($newSuggestionsRaw, $city, $state, $country);
         }
 
         $suggestions = $this->newSuggestionsToMainTexts($newSuggestionsRaw);
@@ -942,22 +1516,28 @@ class LocationController extends Controller
                         $query['types'] = 'address';
                     }
                     if ($iso2) {
-                        $query['components'] = 'country:' . strtoupper($iso2);
+                        $query['components'] = 'country:'.strtoupper($iso2);
                     }
                     if ($latLng) {
-                        $query['location'] = $latLng['lat'] . ',' . $latLng['lng'];
-                        $query['radius'] = 50000;
+                        $query['location'] = $latLng['lat'].','.$latLng['lng'];
+                        $query['radius'] = (int) self::AREA_AUTOCOMPLETE_RADIUS_METERS;
                     }
 
                     $fetched = $this->fetchPlaceAutocompletePredictions($query);
                     $lastLegacyStatus = $fetched['status'];
                     $lastLegacyError = $fetched['error_message'];
-                    if (!$fetched['cacheable']) {
+                    if (! $fetched['cacheable']) {
                         $anyNonCacheableResponse = true;
                     }
                     if ($fetched['predictions'] !== []) {
-                        $suggestionPredictions = $fetched['predictions'];
-                        break 2;
+                        $scopedLegacy = $this->filterLegacyPredictionsByStrictFullDescription($fetched['predictions'], $city, $state, $country);
+                        if ($scopedLegacy !== []) {
+                            $suggestionPredictions = array_slice($scopedLegacy, 0, self::AREA_AUTOCOMPLETE_PRE_DETAILS_LIMIT);
+                            $suggestionPredictions = $this->verifyLegacyPredictionsByPlaceDetails($suggestionPredictions, $city, $state, $country);
+                            if ($suggestionPredictions !== []) {
+                                break 2;
+                            }
+                        }
                     }
                 }
             }
@@ -981,20 +1561,22 @@ class LocationController extends Controller
             ]);
         }
 
-        $shouldCache = $suggestions !== [] || !$anyNonCacheableResponse;
+        $shouldCache = $suggestions !== [] || ! $anyNonCacheableResponse;
 
         // Post-filter to keep results "area-like" (localities/neighborhoods) within the selected city.
-        // If filtering becomes too strict, fall back to original list to avoid breaking UX.
         $filtered = $this->filterAreaLikeSuggestions($suggestions, $country, $city);
-        if ($filtered !== []) {
-            $suggestions = $filtered;
-        }
+        $suggestions = $this->filterSuggestionsByInputPrefix($filtered, $input);
+
+        $payload = [
+            'suggestions' => $suggestions,
+            'message' => $suggestions === [] ? self::AREA_AUTOCOMPLETE_NO_MATCH_MESSAGE : null,
+        ];
 
         if ($shouldCache) {
-            $store->put($cacheKey, $suggestions, now()->addHours(self::GOOGLE_AUTOCOMPLETE_TTL_HOURS));
+            $store->put($cacheKey, $payload, now()->addHours(self::GOOGLE_AUTOCOMPLETE_TTL_HOURS));
         }
 
-        return response()->json($suggestions);
+        return response()->json($payload);
     }
 
     /**
@@ -1002,7 +1584,7 @@ class LocationController extends Controller
      */
     public function areaAutocompleteDebug(Request $request)
     {
-        if (!config('app.debug')) {
+        if (! config('app.debug')) {
             abort(404);
         }
 
@@ -1034,10 +1616,10 @@ class LocationController extends Controller
             'language' => 'en',
         ];
         if ($iso2) {
-            $legacyQuery['components'] = 'country:' . strtoupper($iso2);
+            $legacyQuery['components'] = 'country:'.strtoupper($iso2);
         }
         if ($latLng) {
-            $legacyQuery['location'] = $latLng['lat'] . ',' . $latLng['lng'];
+            $legacyQuery['location'] = $latLng['lat'].','.$latLng['lng'];
             $legacyQuery['radius'] = 50000;
         }
         $legacy = $this->fetchPlaceAutocompletePredictions($legacyQuery);
@@ -1045,16 +1627,16 @@ class LocationController extends Controller
 
         $ok = $newOk || $legacyOk;
 
-        $googleStatus = 'places_new:' . $new['status'] . ';legacy:' . $legacy['status'];
+        $googleStatus = 'places_new:'.$new['status'].';legacy:'.$legacy['status'];
         $errorMessage = null;
-        if (!$newOk && $new['error_message']) {
-            $errorMessage = 'places_new: ' . $new['error_message'];
-        } elseif (!$newOk && $new['status'] !== 'OK' && $new['status'] !== 'ZERO_RESULTS') {
-            $errorMessage = 'places_new: ' . $new['status'];
+        if (! $newOk && $new['error_message']) {
+            $errorMessage = 'places_new: '.$new['error_message'];
+        } elseif (! $newOk && $new['status'] !== 'OK' && $new['status'] !== 'ZERO_RESULTS') {
+            $errorMessage = 'places_new: '.$new['status'];
         }
-        if (!$legacyOk && $legacy['status'] !== 'OK' && $legacy['status'] !== 'ZERO_RESULTS') {
-            $legacyDetail = $legacy['error_message'] ? $legacy['status'] . ' — ' . $legacy['error_message'] : $legacy['status'];
-            $errorMessage = trim(($errorMessage ? $errorMessage . ' | ' : '') . 'legacy: ' . $legacyDetail);
+        if (! $legacyOk && $legacy['status'] !== 'OK' && $legacy['status'] !== 'ZERO_RESULTS') {
+            $legacyDetail = $legacy['error_message'] ? $legacy['status'].' — '.$legacy['error_message'] : $legacy['status'];
+            $errorMessage = trim(($errorMessage ? $errorMessage.' | ' : '').'legacy: '.$legacyDetail);
         }
 
         return response()->json([
@@ -1068,17 +1650,17 @@ class LocationController extends Controller
     public function getIndiaStates(Request $request)
     {
         $request->merge(['country' => 'India']);
+
         return $this->states($request);
     }
 
     // Backward-compat: cities?state=... (India default)
     public function getCities(Request $request)
     {
-        if (!$request->has('country')) {
+        if (! $request->has('country')) {
             $request->merge(['country' => 'India']);
         }
+
         return $this->cities($request);
     }
 }
-
-

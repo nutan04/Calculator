@@ -149,6 +149,12 @@ function calculate() {
              // ✅ Update UI (total only)
     document.getElementById("total").innerText =
         "₹ " + data.total_price.toLocaleString();
+    if (perEl) {
+        const perSqft = Number(data.per_sqft ?? data.avg_price);
+        perEl.innerText = Number.isFinite(perSqft) && perSqft > 0
+            ? ("₹ " + perSqft.toLocaleString() + " / sq ft")
+            : "";
+    }
 
             changeStep(5);
         })
@@ -187,6 +193,8 @@ function calculateClient(opts) {
     document.getElementById("client_total").innerText = "Loading...";
     const clientStatusEl = document.getElementById("client_status");
     if (clientStatusEl) clientStatusEl.innerText = "";
+    const clientPerEl = document.getElementById("client_per");
+    if (clientPerEl) clientPerEl.innerText = "";
 
     // âœ… API CALL
     fetch("/api/price-estimate-client", {
@@ -237,6 +245,9 @@ function calculateClient(opts) {
         // âœ… Update UI (total only)
         document.getElementById("client_total").innerText =
             "₹ " + total.toLocaleString();
+        if (clientPerEl) {
+            clientPerEl.innerText = "₹ " + minPrice.toLocaleString() + " / sq ft";
+        }
         if (clientStatusEl) clientStatusEl.innerText = "";
 
     })
@@ -261,6 +272,7 @@ document.addEventListener("DOMContentLoaded", function () {
     const areaEl = document.getElementById("area");
     const areaListEl = document.getElementById("area_suggestions");
     const areaLoadingEl = document.getElementById("area_loading");
+    const areaNoMatchesEl = document.getElementById("area_no_matches");
     const areaProvider = (areaEl?.dataset?.provider || window.AI_ESTIMATOR_AREA_PROVIDER || "google").toString().toLowerCase();
 
     // Step bar behavior:
@@ -283,7 +295,7 @@ document.addEventListener("DOMContentLoaded", function () {
     const cache = {
         states: new Map(), // key: country
         cities: new Map(), // key: `${country}|${state}`
-        areas: new Map(),  // key: `${country}|${state}|${city}|${s}`
+        areas: new Map(),  // key: `${provider}|${country}|${state}|${city}|${s}`
     };
 
     function escapeHtml(str) {
@@ -311,6 +323,33 @@ document.addEventListener("DOMContentLoaded", function () {
         };
     }
 
+    const defaultAreaNoMatchText =
+        "No matching areas found for this city.";
+
+    /** Area list API may return a bare array (legacy) or { suggestions, message } (Google autocomplete v8+). */
+    function normalizeAreaListPayload(data) {
+        if (Array.isArray(data)) {
+            return { suggestions: data, message: null };
+        }
+        if (data && typeof data === "object" && Array.isArray(data.suggestions)) {
+            const msg = data.message;
+            const message =
+                typeof msg === "string" && msg.trim().length > 0 ? msg.trim() : null;
+            return { suggestions: data.suggestions, message };
+        }
+        return { suggestions: [], message: null };
+    }
+
+    function showAreaNoMatches(emptyAfterFetch, message) {
+        if (!areaNoMatchesEl) return;
+        if (!emptyAfterFetch) {
+            areaNoMatchesEl.style.display = "none";
+            return;
+        }
+        areaNoMatchesEl.style.display = "block";
+        areaNoMatchesEl.textContent = message || defaultAreaNoMatchText;
+    }
+
     function resetDownstreamFromCountry() {
         stateEl.disabled = true;
         cityEl.disabled = true;
@@ -320,6 +359,7 @@ document.addEventListener("DOMContentLoaded", function () {
         areaEl.value = "";
         areaListEl.innerHTML = "";
         setAreaLoading(false);
+        if (areaNoMatchesEl) areaNoMatchesEl.style.display = "none";
         if (areasAbort) {
             try { areasAbort.abort(); } catch (_) {}
         }
@@ -332,6 +372,7 @@ document.addEventListener("DOMContentLoaded", function () {
         areaEl.value = "";
         areaListEl.innerHTML = "";
         setAreaLoading(false);
+        if (areaNoMatchesEl) areaNoMatchesEl.style.display = "none";
         if (areasAbort) {
             try { areasAbort.abort(); } catch (_) {}
         }
@@ -342,6 +383,7 @@ document.addEventListener("DOMContentLoaded", function () {
         areaEl.value = "";
         areaListEl.innerHTML = "";
         setAreaLoading(false);
+        if (areaNoMatchesEl) areaNoMatchesEl.style.display = "none";
         if (areasAbort) {
             try { areasAbort.abort(); } catch (_) {}
         }
@@ -430,6 +472,7 @@ document.addEventListener("DOMContentLoaded", function () {
         const s = areaEl.value.trim();
 
         areaListEl.innerHTML = "";
+        if (areaNoMatchesEl) areaNoMatchesEl.style.display = "none";
         if (!country || !state || !city || s.length < 3) {
             setAreaLoading(false);
             return; // trigger after 3 chars
@@ -440,10 +483,11 @@ document.addEventListener("DOMContentLoaded", function () {
             cityParam = String(cityParam).replace(/\s+urban$/i, "").trim();
         }
 
-        const key = `${country}|${state}|${cityParam}|${s.toLowerCase()}`;
+        const key = `${areaProvider}|${country}|${state}|${cityParam}|${s.toLowerCase()}`;
         if (cache.areas.has(key)) {
-            const areas = cache.areas.get(key);
-            areaListEl.innerHTML = areas.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+            const { suggestions, message } = normalizeAreaListPayload(cache.areas.get(key));
+            areaListEl.innerHTML = suggestions.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+            showAreaNoMatches(suggestions.length === 0, message);
             setAreaLoading(false);
             return;
         }
@@ -456,6 +500,7 @@ document.addEventListener("DOMContentLoaded", function () {
         lastAreasRequestId = requestId;
         areasAbort = new AbortController();
         setAreaLoading(true);
+        const expectedContextKey = `${areaProvider}|${country}|${state}|${cityParam}`;
 
         try {
             const url = areaProvider === "google"
@@ -463,9 +508,17 @@ document.addEventListener("DOMContentLoaded", function () {
                 : `/api/areas?s=${encodeURIComponent(s)}&country=${encodeURIComponent(country)}&state=${encodeURIComponent(state)}&city=${encodeURIComponent(cityParam)}`;
             const res = await fetch(url, { signal: areasAbort.signal });
             const data = await res.json();
-            const areas = Array.isArray(data) ? data : [];
-            cache.areas.set(key, areas);
-            areaListEl.innerHTML = areas.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+            const { suggestions, message } = normalizeAreaListPayload(data);
+
+            // Ignore out-of-order responses (e.g. user changed city/state while request was in-flight).
+            const currentContextKey = `${areaProvider}|${countryEl.value}|${stateEl.value}|${cityEl.value}`;
+            if (requestId !== lastAreasRequestId || currentContextKey !== expectedContextKey) {
+                return;
+            }
+
+            cache.areas.set(key, { suggestions, message });
+            areaListEl.innerHTML = suggestions.map(a => `<option value="${escapeHtml(a)}"></option>`).join("");
+            showAreaNoMatches(suggestions.length === 0, message);
         } catch (e) {
             if (e && e.name === "AbortError") return;
             console.error("[ai-estimator] Failed loading areas", e);

@@ -28,7 +28,7 @@
 
             <div class="step-item active">
                 <div class="circle">1</div>
-                <span>AREA</span>
+                <span>LOCALITY</span>
             </div>
 
             <div class="line"></div>
@@ -91,9 +91,9 @@
                 </div>
 
                 <div class="form-group">
-                    <label>Area</label>
+                    <label>Locality</label>
                     <div style="display:flex; align-items:center; gap:10px;">
-                        <input id="area" placeholder="Enter Area (e.g. Baner)" list="area_suggestions" required disabled style="flex:1 1 auto;">
+                        <input id="area" placeholder="Enter locality (e.g. Baner)" list="area_suggestions" required disabled style="flex:1 1 auto;">
                         <span id="area_loading" role="status" aria-live="polite" style="display:none; font-size:12px; opacity:.8; white-space:nowrap;">Loading...</span>
                     </div>
                     <div id="area_no_matches" style="display:none; margin-top:6px; font-size:12px; opacity:.85;" aria-live="polite"></div>

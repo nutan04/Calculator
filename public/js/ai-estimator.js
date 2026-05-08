@@ -324,7 +324,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     const defaultAreaNoMatchText =
-        "No matching areas found for this city.";
+        "No matching localities found for this city.";
 
     /** Area list API may return a bare array (legacy) or { suggestions, message } (Google autocomplete v8+). */
     function normalizeAreaListPayload(data) {
